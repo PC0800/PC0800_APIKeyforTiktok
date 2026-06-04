@@ -107,17 +107,17 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
     url = download_req.url
     qualidade = download_req.video_quality
 
-    # Mapeamento das qualidades para formatos yt-dlp
+    # Mapeamento para yt-dlp (usando best[height<=...] para manter áudio incluso)
     if qualidade == "1080p":
-        format_spec = "bestvideo[height<=1080]+bestaudio/best"
+        format_spec = "best[height<=1080]"
     elif qualidade == "720p":
-        format_spec = "bestvideo[height<=720]+bestaudio/best"
+        format_spec = "best[height<=720]"
     elif qualidade == "480p":
-        format_spec = "bestvideo[height<=480]+bestaudio/best"
+        format_spec = "best[height<=480]"
     elif qualidade == "2k":
-        format_spec = "bestvideo[height<=1440]+bestaudio/best"
+        format_spec = "best[height<=1440]"
     elif qualidade == "4k":
-        format_spec = "bestvideo[height<=2160]+bestaudio/best"
+        format_spec = "best[height<=2160]"
     else:
         format_spec = "best"   # melhor qualidade disponível
 
@@ -127,13 +127,15 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
     ydl_opts = {
         'format': format_spec,
         'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
-        'quiet': True,
+        'quiet': False,   # temporariamente para ver logs
         'no_warnings': True,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info)
+            # Log do formato escolhido
+            logger.info(f"Qualidade solicitada: {qualidade}, formato usado: {info.get('format_id', 'desconhecido')}")
             if os.path.exists(file_path):
                 return FileResponse(
                     path=file_path,

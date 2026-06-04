@@ -3,6 +3,7 @@ import time
 import os
 import logging
 import yt_dlp
+import requests                     # <-- NOVO
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
 from fastapi.security import APIKeyHeader
@@ -24,10 +25,25 @@ def clean_tiktok_url(url: str) -> str:
         url = 'https://' + url
     return url
 
-# 3. CARREGAR VARIÁVEIS DE AMBIENTE
+# 3. FUNÇÃO PARA EXPANDIR LINKS ENCURTADOS (vt.tiktok.com)
+def expand_tiktok_url(url: str) -> str:
+    """Segue redirecionamentos e retorna a URL final do vídeo"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        # Segue redirecionamento (allow_redirects=True é padrão)
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        return response.url
+    except Exception as e:
+        logger.warning(f"Falha ao expandir URL {url}: {e}")
+        return url  # fallback
+
+# 4. CARREGAR VARIÁVEIS DE AMBIENTE
 load_dotenv()
 
-# 4. CONFIGURAÇÕES INICIAIS
+# 5. CONFIGURAÇÕES INICIAIS
 app = FastAPI(title="API de Download TikTok")
 
 # --- Rate Limiting ---
@@ -83,7 +99,7 @@ class DownloadRequest(BaseModel):
     video_quality: str = None
     audio_quality: str = None
 
-# 5. FUNÇÃO DE VALIDAÇÃO DA API KEY
+# 6. FUNÇÃO DE VALIDAÇÃO DA API KEY
 async def validar_api_key(api_key: str = Security(api_key_header)):
     if api_key is None:
         raise HTTPException(
@@ -98,24 +114,25 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
         )
     return api_key
 
-# 6. ENDPOINTS
+# 7. ENDPOINTS
 
 @app.get("/")
 async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
 
 # --------------------------------------------------------------
-# DOWNLOAD DE VÍDEO (com extractor_args para TikTok)
+# DOWNLOAD DE VÍDEO (expansão + impersonation)
 # --------------------------------------------------------------
 @app.post("/download/video")
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
+    # 1. Limpa a URL
     url = clean_tiktok_url(download_req.url)
+    # 2. Expande link curto para URL completa
+    url = expand_tiktok_url(url)
     qualidade = download_req.video_quality
 
-    height_map = {
-        "1080p": 1080
-    }
+    height_map = {"1080p": 1080}
     max_height = height_map.get(qualidade)
 
     if max_height:
@@ -133,7 +150,7 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
             'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
-            'impersonate': 'chrome',  # Ativa a funcionalidade de impersonação
+            'impersonate': 'chrome',            # impersonação para evitar bloqueios
             'extractor_args': {
                 'tiktok': {
                     'app_info': ['7139591046345753862'],
@@ -161,12 +178,13 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
     raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(last_exception)}")
 
 # --------------------------------------------------------------
-# DOWNLOAD DE ÁUDIO (com extractor_args para TikTok)
+# DOWNLOAD DE ÁUDIO (expansão + impersonation)
 # --------------------------------------------------------------
 @app.post("/download/audio")
 @limiter.limit("5/minute")
 async def download_audio(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
     url = clean_tiktok_url(download_req.url)
+    url = expand_tiktok_url(url)
     qualidade = download_req.audio_quality
 
     quality_map = {
@@ -190,9 +208,10 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
         }],
         'quiet': True,
         'no_warnings': True,
+        'impersonate': 'chrome',
         'extractor_args': {
             'tiktok': {
-                'app_info': ['7139591046345753862'],  # mesmo IID
+                'app_info': ['7139591046345753862'],
             }
         }
     }
@@ -214,15 +233,17 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
 
 # --------------------------------------------------------------
-# INFORMAÇÕES DO VÍDEO (com extractor_args para TikTok)
+# INFORMAÇÕES DO VÍDEO (expansão + impersonation)
 # --------------------------------------------------------------
 @app.get("/info")
 @limiter.limit("10/minute")
 async def get_video_info(request: Request, url: str, api_key: str = Depends(validar_api_key)):
     url = clean_tiktok_url(url)
+    url = expand_tiktok_url(url)
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
+        'impersonate': 'chrome',
         'extractor_args': {
             'tiktok': {
                 'app_info': ['7139591046345753862'],

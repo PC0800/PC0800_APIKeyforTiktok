@@ -6,3 +6,7 @@ slowapi==0.1.9
 yt-dlp[default,curl-cffi]>=2025.1.0
 curl_cffi
 requests==2.32.3
+tiktokapipy>=0.2.4
+playwright
+nest-asyncio
+aiohttp

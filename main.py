@@ -113,7 +113,9 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
     url = clean_tiktok_url(download_req.url)
     qualidade = download_req.video_quality
 
-    height_map = {"1080p": 1080}
+    height_map = {
+        "1080p": 1080
+    }
     max_height = height_map.get(qualidade)
 
     if max_height:
@@ -131,9 +133,10 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
             'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
+            'impersonate': 'chrome',  # Ativa a funcionalidade de impersonação
             'extractor_args': {
                 'tiktok': {
-                    'app_info': ['7139591046345753862'],  # IID genérico funcional
+                    'app_info': ['7139591046345753862'],
                 }
             }
         }

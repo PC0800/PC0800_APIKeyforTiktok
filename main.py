@@ -20,15 +20,14 @@ load_dotenv()
 # 3. CONFIGURAÇÕES INICIAIS
 app = FastAPI(title="API de Download TikTok")
 
-# --- Configuração do Rate Limiting ---
+# --- Rate Limiting ---
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# --- Configuração de logging nativo ---
+# --- Logging nativo ---
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -45,7 +44,6 @@ async def log_requests(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     process_time = (time.time() - start_time) * 1000
-    # Tenta obter IP real do cliente (Render usa proxy)
     client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
     if not client_ip:
         client_ip = request.client.host if request.client else "unknown"
@@ -56,7 +54,7 @@ async def log_requests(request: Request, call_next):
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://tiktok-downloader-8y2.pages.dev"],
+    allow_origins=["https://tiktok-downloader-8y2.pages.dev"],  # altere se necessário
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,10 +67,13 @@ if not API_KEY:
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG_PATH = "ffmpeg"
+FFMPEG_PATH = "ffmpeg"   # static-ffmpeg se encarrega disso
 
+# --- Modelo de requisição com qualidades opcionais ---
 class DownloadRequest(BaseModel):
     url: str
+    video_quality: str = None   # "480p", "720p", "1080p", "2k", "4k"
+    audio_quality: str = None   # "64kbps", "128kbps", "256kbps", "320kbps"
 
 # 4. FUNÇÃO DE VALIDAÇÃO DA API KEY
 async def validar_api_key(api_key: str = Security(api_key_header)):
@@ -90,6 +91,7 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
     return api_key
 
 # 5. ENDPOINTS
+
 @app.get("/")
 async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
@@ -98,11 +100,27 @@ async def root():
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
     url = download_req.url
+    qualidade = download_req.video_quality
+
+    # Mapeamento das qualidades para formatos yt-dlp
+    if qualidade == "1080p":
+        format_spec = "bestvideo[height<=1080]+bestaudio/best"
+    elif qualidade == "720p":
+        format_spec = "bestvideo[height<=720]+bestaudio/best"
+    elif qualidade == "480p":
+        format_spec = "bestvideo[height<=480]+bestaudio/best"
+    elif qualidade == "2k":
+        format_spec = "bestvideo[height<=1440]+bestaudio/best"
+    elif qualidade == "4k":
+        format_spec = "bestvideo[height<=2160]+bestaudio/best"
+    else:
+        format_spec = "best"   # melhor qualidade disponível
+
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
     ydl_opts = {
-        'format': 'best',
+        'format': format_spec,
         'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
@@ -126,6 +144,17 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
 @limiter.limit("5/minute")
 async def download_audio(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
     url = download_req.url
+    qualidade = download_req.audio_quality
+
+    # Mapeamento de qualidade para bitrate (kbps)
+    quality_map = {
+        "64kbps": "64",
+        "128kbps": "128",
+        "256kbps": "256",
+        "320kbps": "320",
+    }
+    bitrate = quality_map.get(qualidade, "192")  # padrão 192kbps
+
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
@@ -135,9 +164,10 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
-            'preferredquality': '192',
+            'preferredquality': bitrate,
         }],
         'quiet': True,
+        'no_warnings': True,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:

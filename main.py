@@ -16,7 +16,7 @@ app = FastAPI(title="API de Download TikTok")
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://tiktok-downloader-8y2.pages.dev"],   # ou ["https://tiktok-downloader-8y2.pages.dev"]
+    allow_origins=["*"],   # temporariamente aceita qualquer origem
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

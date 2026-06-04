@@ -1,24 +1,46 @@
 # 1. IMPORTS (todas as bibliotecas necessárias)
 import time
-import shutil
 import os
 import yt_dlp
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, Security, status, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
 from fastapi.security import APIKeyHeader
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+# Rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+# Logging
+from fastapi_ndjson_logger import RequestResponseLogging
 
 # 2. CARREGAR VARIÁVEIS DE AMBIENTE
 load_dotenv()
 
 # 3. CONFIGURAÇÕES INICIAIS
 app = FastAPI(title="API de Download TikTok")
-# HABILITAR CORS
+
+# --- Configuração do Rate Limiting ---
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --- Configuração do Logging ---
+os.makedirs("logs", exist_ok=True)
+app.add_middleware(
+    RequestResponseLogging,
+    log_dir=os.path.join("logs"),  # Diretório onde os logs serão salvos
+    max_mbytes=10,                 # Tamanho máximo de cada arquivo de log (em MB)
+    backup_count=5                 # Número de arquivos de backup a serem mantidos
+)
+
+# --- CORS ---
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://tiktok-downloader-8y2.pages.dev"],   # temporariamente aceita qualquer origem
+    allow_origins=["https://tiktok-downloader-8y2.pages.dev"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,7 +53,7 @@ if not API_KEY:
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG_PATH = "ffmpeg"   # O static-ffmpeg coloca o executável no PATH
+FFMPEG_PATH = "ffmpeg"
 
 class DownloadRequest(BaseModel):
     url: str
@@ -51,14 +73,14 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
         )
     return api_key
 
-# 5. ENDPOINT PÚBLICO (opcional)
+# 5. ENDPOINTS
 @app.get("/")
 async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
 
-# 6. ENDPOINT PARA DOWNLOAD DE VÍDEO (MP4)
 @app.post("/download/video")
-async def download_video(request: DownloadRequest, api_key: str = Depends(validar_api_key)):
+@limiter.limit("3/minute")
+async def download_video(request: DownloadRequest, request_obj: Request, api_key: str = Depends(validar_api_key)):
     url = request.url
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
@@ -84,9 +106,9 @@ async def download_video(request: DownloadRequest, api_key: str = Depends(valida
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(e)}")
 
-# 7. ENDPOINT PARA DOWNLOAD DE ÁUDIO (MP3)
 @app.post("/download/audio")
-async def download_audio(request: DownloadRequest, api_key: str = Depends(validar_api_key)):
+@limiter.limit("3/minute")
+async def download_audio(request: DownloadRequest, request_obj: Request, api_key: str = Depends(validar_api_key)):
     url = request.url
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
@@ -116,9 +138,10 @@ async def download_audio(request: DownloadRequest, api_key: str = Depends(valida
                 raise HTTPException(status_code=404, detail="Arquivo MP3 não encontrado após processamento")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
-# 8. ENDPOINT: Para buscar informações (título e capa)
+
 @app.get("/info")
-async def get_video_info(url: str, api_key: str = Depends(validar_api_key)):
+@limiter.limit("10/minute")
+async def get_video_info(request: Request, url: str, api_key: str = Depends(validar_api_key)):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -137,9 +160,10 @@ async def get_video_info(url: str, api_key: str = Depends(validar_api_key)):
             }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao obter informações: {str(e)}")
-    
+
 @app.delete("/cleanup")
-async def cleanup_old_files(api_key: str = Depends(validar_api_key), hours: int = 1):
+@limiter.limit("1/minute")
+async def cleanup_old_files(request: Request, api_key: str = Depends(validar_api_key), hours: int = 1):
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     if not os.path.exists(downloads_dir):
         return {"message": "Pasta downloads não existe"}

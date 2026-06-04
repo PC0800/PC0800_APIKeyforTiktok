@@ -3,7 +3,10 @@ import time
 import os
 import logging
 import yt_dlp
-import requests                     # <-- NOVO
+import requests
+import asyncio
+import nest_asyncio
+import tempfile
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
 from fastapi.security import APIKeyHeader
@@ -13,6 +16,16 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi.middleware.cors import CORSMiddleware
+
+# TikTokPy
+from tiktokapipy.async_api import AsyncTikTokAPI
+import aiohttp
+import warnings
+from tiktokapipy import TikTokAPIWarning
+warnings.filterwarnings("ignore", category=TikTokAPIWarning)
+
+# Permite rodar asyncio em ambiente já com loop (útil para alguns servidores)
+nest_asyncio.apply()
 
 # 2. FUNÇÃO AUXILIAR PARA LIMPAR URL DO TIKTOK
 def clean_tiktok_url(url: str) -> str:
@@ -32,18 +45,38 @@ def expand_tiktok_url(url: str) -> str:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-        # Segue redirecionamento (allow_redirects=True é padrão)
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.url
     except Exception as e:
         logger.warning(f"Falha ao expandir URL {url}: {e}")
-        return url  # fallback
+        return url
 
-# 4. CARREGAR VARIÁVEIS DE AMBIENTE
+# 4. FUNÇÃO DE FALLBACK COM TIKTOKPY
+async def download_with_tiktokpy(url: str, temp_dir: str) -> str:
+    """Baixa o vídeo usando TikTokPy (navegador real). Retorna o caminho do arquivo."""
+    try:
+        async with AsyncTikTokAPI() as api:
+            video = await api.video(url)
+            video_url = video.video_url
+            if not video_url:
+                raise Exception("Nenhuma URL de vídeo encontrada")
+            filename = os.path.join(temp_dir, f"tiktok_video_{video.id}.mp4")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(video_url) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"Erro ao baixar vídeo: status {resp.status}")
+                    with open(filename, "wb") as f:
+                        f.write(await resp.read())
+            return filename
+    except Exception as e:
+        logger.error(f"Erro no TikTokPy: {e}")
+        raise e
+
+# 5. CARREGAR VARIÁVEIS DE AMBIENTE
 load_dotenv()
 
-# 5. CONFIGURAÇÕES INICIAIS
+# 6. CONFIGURAÇÕES INICIAIS
 app = FastAPI(title="API de Download TikTok")
 
 # --- Rate Limiting ---
@@ -64,7 +97,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-# Middleware para log de requisições
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -85,7 +117,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Variáveis de ambiente e configuração ---
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:
     raise ValueError("A variável de ambiente 'API_KEY' não foi configurada!")
@@ -99,7 +130,7 @@ class DownloadRequest(BaseModel):
     video_quality: str = None
     audio_quality: str = None
 
-# 6. FUNÇÃO DE VALIDAÇÃO DA API KEY
+# 7. FUNÇÃO DE VALIDAÇÃO DA API KEY
 async def validar_api_key(api_key: str = Security(api_key_header)):
     if api_key is None:
         raise HTTPException(
@@ -114,71 +145,89 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
         )
     return api_key
 
-# 7. ENDPOINTS
+# 8. ENDPOINTS
 
 @app.get("/")
 async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
 
 # --------------------------------------------------------------
-# DOWNLOAD DE VÍDEO (expansão + impersonation)
+# DOWNLOAD DE VÍDEO (yt-dlp com fallback TikTokPy)
 # --------------------------------------------------------------
 @app.post("/download/video")
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
-    # 1. Limpa a URL
     url = clean_tiktok_url(download_req.url)
-    # 2. Expande link curto para URL completa
     url = expand_tiktok_url(url)
     qualidade = download_req.video_quality
-
-    height_map = {"1080p": 1080}
-    max_height = height_map.get(qualidade)
-
-    if max_height:
-        format_list = [f"best[height<={max_height}]", "best"]
-    else:
-        format_list = ["best"]
 
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
-    last_exception = None
-    for format_spec in format_list:
-        ydl_opts = {
-            'format': format_spec,
-            'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'impersonate': 'chrome',            # impersonação para evitar bloqueios
-            'extractor_args': {
-                'tiktok': {
-                    'app_info': ['7139591046345753862'],
+    # --- Tentativa 1: yt-dlp ---
+    try:
+        height_map = {"1080p": 1080}
+        max_height = height_map.get(qualidade)
+
+        if max_height:
+            format_list = [f"best[height<={max_height}]", "best"]
+        else:
+            format_list = ["best"]
+
+        last_exception = None
+        for format_spec in format_list:
+            ydl_opts = {
+                'format': format_spec,
+                'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'impersonate': 'chrome',
+                'extractor_args': {
+                    'tiktok': {
+                        'app_info': ['7139591046345753862'],
+                    }
                 }
             }
-        }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                file_path = ydl.prepare_filename(info)
-                if os.path.exists(file_path):
-                    return FileResponse(
-                        path=file_path,
-                        filename=os.path.basename(file_path),
-                        media_type="video/mp4"
-                    )
-                else:
-                    raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
-        except Exception as e:
-            last_exception = e
-            logger.warning(f"Formato {format_spec} falhou: {str(e)}. Tentando próximo...")
-            continue
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    file_path = ydl.prepare_filename(info)
+                    if os.path.exists(file_path):
+                        return FileResponse(
+                            path=file_path,
+                            filename=os.path.basename(file_path),
+                            media_type="video/mp4"
+                        )
+                    else:
+                        raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"Formato {format_spec} falhou: {str(e)}. Tentando próximo...")
+                continue
+        # Se chegou aqui, todos os formatos falharam
+        raise last_exception
 
-    logger.error(f"Todos os formatos falharam para qualidade {qualidade}. Último erro: {last_exception}")
-    raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(last_exception)}")
+    except Exception as e:
+        # Se falhou (especialmente erro 400), tentar fallback com TikTokPy
+        logger.warning(f"yt-dlp falhou: {str(e)}. Tentando fallback com TikTokPy...")
+        try:
+            # Criar diretório temporário para não misturar com downloads do yt-dlp
+            with tempfile.TemporaryDirectory() as tmpdir:
+                file_path = await download_with_tiktokpy(url, tmpdir)
+                # Mover para a pasta permanente de downloads
+                final_path = os.path.join(downloads_dir, os.path.basename(file_path))
+                os.rename(file_path, final_path)
+                return FileResponse(
+                    path=final_path,
+                    filename=os.path.basename(final_path),
+                    media_type="video/mp4"
+                )
+        except Exception as fallback_error:
+            logger.error(f"Fallback também falhou: {str(fallback_error)}")
+            raise HTTPException(status_code=400, detail=f"Falha no download: {str(fallback_error)}")
 
 # --------------------------------------------------------------
-# DOWNLOAD DE ÁUDIO (expansão + impersonation)
+# DOWNLOAD DE ÁUDIO (apenas yt-dlp, sem fallback por simplicidade)
 # --------------------------------------------------------------
 @app.post("/download/audio")
 @limiter.limit("5/minute")
@@ -233,7 +282,7 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
 
 # --------------------------------------------------------------
-# INFORMAÇÕES DO VÍDEO (expansão + impersonation)
+# INFORMAÇÕES DO VÍDEO (apenas yt-dlp)
 # --------------------------------------------------------------
 @app.get("/info")
 @limiter.limit("10/minute")

@@ -55,10 +55,7 @@ from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://tiktok-downloader-8y2.pages.dev",           # sem barra no final
-        "https://*.tiktok-downloader-8y2.pages.dev",         # qualquer subdomínio
-        "https://*.pages.dev",                               # qualquer projeto pages.dev
-        "http://localhost:8000",                             # para testes locais
+        "*"  # Permitir todas as origens (A URL do site muda a cada deploy, então é mais fácil permitir todas e controlar acesso via API Key)
     ],
     allow_credentials=True,
     allow_methods=["*"],

@@ -18,10 +18,8 @@ def clean_tiktok_url(url: str) -> str:
     """Remove parâmetros de rastreamento da URL do TikTok e garante https"""
     if not url:
         return url
-    # Remove tudo após '?'
     if '?' in url:
         url = url.split('?')[0]
-    # Garante https:// se não tiver
     if not url.startswith('http'):
         url = 'https://' + url
     return url
@@ -50,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-# Middleware para log de requisições (captura IP real atrás de proxy)
+# Middleware para log de requisições
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -65,7 +63,7 @@ async def log_requests(request: Request, call_next):
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Permite qualquer origem (para o frontend no Pages)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -78,13 +76,12 @@ if not API_KEY:
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG_PATH = "ffmpeg"   # static-ffmpeg se encarrega disso
+FFMPEG_PATH = "ffmpeg"
 
-# --- Modelo de requisição com qualidades opcionais ---
 class DownloadRequest(BaseModel):
     url: str
-    video_quality: str = None   # "480p", "720p", "1080p", "2k", "4k"
-    audio_quality: str = None   # "64kbps", "128kbps", "256kbps", "320kbps"
+    video_quality: str = None
+    audio_quality: str = None
 
 # 5. FUNÇÃO DE VALIDAÇÃO DA API KEY
 async def validar_api_key(api_key: str = Security(api_key_header)):
@@ -107,24 +104,20 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
 async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
 
+# --------------------------------------------------------------
+# DOWNLOAD DE VÍDEO (com extractor_args para TikTok)
+# --------------------------------------------------------------
 @app.post("/download/video")
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
     url = clean_tiktok_url(download_req.url)
     qualidade = download_req.video_quality
 
-    # Mapeamento qualidade -> altura máxima
-    height_map = {
-        "1080p": 1080
-    }
+    height_map = {"1080p": 1080}
     max_height = height_map.get(qualidade)
 
-    # Lista de formatos a tentar (prioridade da qualidade escolhida, depois best)
     if max_height:
-        format_list = [
-            f"best[height<={max_height}]",   # tenta a qualidade específica
-            "best"                            # fallback: melhor disponível
-        ]
+        format_list = [f"best[height<={max_height}]", "best"]
     else:
         format_list = ["best"]
 
@@ -138,6 +131,11 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
             'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
             'quiet': True,
             'no_warnings': True,
+            'extractor_args': {
+                'tiktok': {
+                    'app_info': ['7139591046345753862'],  # IID genérico funcional
+                }
+            }
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -156,24 +154,25 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
             logger.warning(f"Formato {format_spec} falhou: {str(e)}. Tentando próximo...")
             continue
 
-    # Se chegou aqui, nenhum formato funcionou
     logger.error(f"Todos os formatos falharam para qualidade {qualidade}. Último erro: {last_exception}")
     raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(last_exception)}")
 
+# --------------------------------------------------------------
+# DOWNLOAD DE ÁUDIO (com extractor_args para TikTok)
+# --------------------------------------------------------------
 @app.post("/download/audio")
 @limiter.limit("5/minute")
 async def download_audio(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
     url = clean_tiktok_url(download_req.url)
     qualidade = download_req.audio_quality
 
-    # Mapeamento de qualidade para bitrate (kbps)
     quality_map = {
         "64kbps": "64",
         "128kbps": "128",
         "256kbps": "256",
         "320kbps": "320",
     }
-    bitrate = quality_map.get(qualidade, "192")  # padrão 192kbps
+    bitrate = quality_map.get(qualidade, "192")
 
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
@@ -188,6 +187,11 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
         }],
         'quiet': True,
         'no_warnings': True,
+        'extractor_args': {
+            'tiktok': {
+                'app_info': ['7139591046345753862'],  # mesmo IID
+            }
+        }
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -206,6 +210,9 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
         logger.error(f"Erro no download do áudio: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
 
+# --------------------------------------------------------------
+# INFORMAÇÕES DO VÍDEO (com extractor_args para TikTok)
+# --------------------------------------------------------------
 @app.get("/info")
 @limiter.limit("10/minute")
 async def get_video_info(request: Request, url: str, api_key: str = Depends(validar_api_key)):
@@ -213,6 +220,11 @@ async def get_video_info(request: Request, url: str, api_key: str = Depends(vali
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
+        'extractor_args': {
+            'tiktok': {
+                'app_info': ['7139591046345753862'],
+            }
+        }
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -229,6 +241,9 @@ async def get_video_info(request: Request, url: str, api_key: str = Depends(vali
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao obter informações: {str(e)}")
 
+# --------------------------------------------------------------
+# LIMPEZA DE ARQUIVOS ANTIGOS
+# --------------------------------------------------------------
 @app.delete("/cleanup")
 @limiter.limit("1/minute")
 async def cleanup_old_files(request: Request, api_key: str = Depends(validar_api_key), hours: int = 1):

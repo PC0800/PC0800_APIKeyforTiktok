@@ -1,4 +1,6 @@
 # 1. IMPORTS (todas as bibliotecas necessárias)
+import time
+import shutil
 import os
 import yt_dlp
 from dotenv import load_dotenv
@@ -16,7 +18,7 @@ app = FastAPI(title="API de Download TikTok")
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # temporariamente aceita qualquer origem
+    allow_origins=["https://tiktok-downloader-8y2.pages.dev"],   # temporariamente aceita qualquer origem
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -135,3 +137,19 @@ async def get_video_info(url: str, api_key: str = Depends(validar_api_key)):
             }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao obter informações: {str(e)}")
+    
+@app.delete("/cleanup")
+async def cleanup_old_files(api_key: str = Depends(validar_api_key), hours: int = 1):
+    downloads_dir = os.path.join(BASE_DIR, "downloads")
+    if not os.path.exists(downloads_dir):
+        return {"message": "Pasta downloads não existe"}
+    now = time.time()
+    deleted = 0
+    for filename in os.listdir(downloads_dir):
+        filepath = os.path.join(downloads_dir, filename)
+        if os.path.isfile(filepath):
+            file_age_hours = (now - os.path.getmtime(filepath)) / 3600
+            if file_age_hours > hours:
+                os.remove(filepath)
+                deleted += 1
+    return {"message": f"Limpeza concluída. {deleted} arquivos removidos."}

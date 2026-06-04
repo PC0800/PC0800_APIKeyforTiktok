@@ -8,16 +8,28 @@ from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
 from fastapi.security import APIKeyHeader
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-
-# Rate limiting
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from fastapi.middleware.cors import CORSMiddleware
 
-# 2. CARREGAR VARIÁVEIS DE AMBIENTE
+# 2. FUNÇÃO AUXILIAR PARA LIMPAR URL DO TIKTOK
+def clean_tiktok_url(url: str) -> str:
+    """Remove parâmetros de rastreamento da URL do TikTok e garante https"""
+    if not url:
+        return url
+    # Remove tudo após '?'
+    if '?' in url:
+        url = url.split('?')[0]
+    # Garante https:// se não tiver
+    if not url.startswith('http'):
+        url = 'https://' + url
+    return url
+
+# 3. CARREGAR VARIÁVEIS DE AMBIENTE
 load_dotenv()
 
-# 3. CONFIGURAÇÕES INICIAIS
+# 4. CONFIGURAÇÕES INICIAIS
 app = FastAPI(title="API de Download TikTok")
 
 # --- Rate Limiting ---
@@ -51,23 +63,20 @@ async def log_requests(request: Request, call_next):
     return response
 
 # --- CORS ---
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "*"  # Permitir todas as origens (A URL do site muda a cada deploy, então é mais fácil permitir todas e controlar acesso via API Key)
-    ],
+    allow_origins=["*"],  # Permite qualquer origem (para o frontend no Pages)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --- Variáveis de ambiente e configuração ---
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:
     raise ValueError("A variável de ambiente 'API_KEY' não foi configurada!")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FFMPEG_PATH = "ffmpeg"   # static-ffmpeg se encarrega disso
 
@@ -77,7 +86,7 @@ class DownloadRequest(BaseModel):
     video_quality: str = None   # "480p", "720p", "1080p", "2k", "4k"
     audio_quality: str = None   # "64kbps", "128kbps", "256kbps", "320kbps"
 
-# 4. FUNÇÃO DE VALIDAÇÃO DA API KEY
+# 5. FUNÇÃO DE VALIDAÇÃO DA API KEY
 async def validar_api_key(api_key: str = Security(api_key_header)):
     if api_key is None:
         raise HTTPException(
@@ -92,7 +101,7 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
         )
     return api_key
 
-# 5. ENDPOINTS
+# 6. ENDPOINTS
 
 @app.get("/")
 async def root():
@@ -101,54 +110,60 @@ async def root():
 @app.post("/download/video")
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
-    url = download_req.url
+    url = clean_tiktok_url(download_req.url)
     qualidade = download_req.video_quality
 
-    # Dicionário de mapeamento qualidade -> altura máxima
+    # Mapeamento qualidade -> altura máxima
     height_map = {
-        "480p": 480,
-        "720p": 720,
-        "1080p": 1080,
+        "1080p": 1080
     }
     max_height = height_map.get(qualidade)
 
-    # Construção do format spec
+    # Lista de formatos a tentar (prioridade da qualidade escolhida, depois best)
     if max_height:
-        # Tenta baixar o melhor stream completo (vídeo+áudio) com altura <= max_height
-        format_spec = f"best[height<={max_height}]"
+        format_list = [
+            f"best[height<={max_height}]",   # tenta a qualidade específica
+            "best"                            # fallback: melhor disponível
+        ]
     else:
-        format_spec = "best"   # fallback
+        format_list = ["best"]
 
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
-    ydl_opts = {
-        'format': format_spec,
-        'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-            if os.path.exists(file_path):
-                return FileResponse(
-                    path=file_path,
-                    filename=os.path.basename(file_path),
-                    media_type="video/mp4"
-                )
-            else:
-                raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
-    except Exception as e:
-        # Log do erro detalhado
-        logger.error(f"Erro no download do vídeo: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(e)}")
+    last_exception = None
+    for format_spec in format_list:
+        ydl_opts = {
+            'format': format_spec,
+            'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
+                if os.path.exists(file_path):
+                    return FileResponse(
+                        path=file_path,
+                        filename=os.path.basename(file_path),
+                        media_type="video/mp4"
+                    )
+                else:
+                    raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
+        except Exception as e:
+            last_exception = e
+            logger.warning(f"Formato {format_spec} falhou: {str(e)}. Tentando próximo...")
+            continue
+
+    # Se chegou aqui, nenhum formato funcionou
+    logger.error(f"Todos os formatos falharam para qualidade {qualidade}. Último erro: {last_exception}")
+    raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(last_exception)}")
 
 @app.post("/download/audio")
 @limiter.limit("5/minute")
 async def download_audio(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
-    url = download_req.url
+    url = clean_tiktok_url(download_req.url)
     qualidade = download_req.audio_quality
 
     # Mapeamento de qualidade para bitrate (kbps)
@@ -188,11 +203,13 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
             else:
                 raise HTTPException(status_code=404, detail="Arquivo MP3 não encontrado após processamento")
     except Exception as e:
+        logger.error(f"Erro no download do áudio: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
 
 @app.get("/info")
 @limiter.limit("10/minute")
 async def get_video_info(request: Request, url: str, api_key: str = Depends(validar_api_key)):
+    url = clean_tiktok_url(url)
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,

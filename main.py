@@ -158,73 +158,40 @@ async def root():
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
     url = clean_tiktok_url(download_req.url)
-    url = expand_tiktok_url(url)
+    url = expand_tiktok_url(url)  # Expande o link curto
     qualidade = download_req.video_quality
+
+    # Mapeamento de qualidade (apenas 1080p)
+    height_map = {"1080p": 1080}
+    max_height = height_map.get(qualidade)
+
+    format_spec = f"best[height<={max_height}]" if max_height else "best"
 
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
-    # --- Tentativa 1: yt-dlp ---
+    ydl_opts = {
+        'format': format_spec,
+        'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        # Opcional: 'impersonate': 'chrome', (se ainda quiser tentar)
+    }
     try:
-        height_map = {"1080p": 1080}
-        max_height = height_map.get(qualidade)
-
-        if max_height:
-            format_list = [f"best[height<={max_height}]", "best"]
-        else:
-            format_list = ["best"]
-
-        last_exception = None
-        for format_spec in format_list:
-            ydl_opts = {
-                'format': format_spec,
-                'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
-                'impersonate': 'chrome',
-                'extractor_args': {
-                    'tiktok': {
-                        'app_info': ['7139591046345753862'],
-                    }
-                }
-            }
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    file_path = ydl.prepare_filename(info)
-                    if os.path.exists(file_path):
-                        return FileResponse(
-                            path=file_path,
-                            filename=os.path.basename(file_path),
-                            media_type="video/mp4"
-                        )
-                    else:
-                        raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
-            except Exception as e:
-                last_exception = e
-                logger.warning(f"Formato {format_spec} falhou: {str(e)}. Tentando próximo...")
-                continue
-        # Se chegou aqui, todos os formatos falharam
-        raise last_exception
-
-    except Exception as e:
-        # Se falhou (especialmente erro 400), tentar fallback com TikTokPy
-        logger.warning(f"yt-dlp falhou: {str(e)}. Tentando fallback com TikTokPy...")
-        try:
-            # Criar diretório temporário para não misturar com downloads do yt-dlp
-            with tempfile.TemporaryDirectory() as tmpdir:
-                file_path = await download_with_tiktokpy(url, tmpdir)
-                # Mover para a pasta permanente de downloads
-                final_path = os.path.join(downloads_dir, os.path.basename(file_path))
-                os.rename(file_path, final_path)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            file_path = ydl.prepare_filename(info)
+            if os.path.exists(file_path):
                 return FileResponse(
-                    path=final_path,
-                    filename=os.path.basename(final_path),
+                    path=file_path,
+                    filename=os.path.basename(file_path),
                     media_type="video/mp4"
                 )
-        except Exception as fallback_error:
-            logger.error(f"Fallback também falhou: {str(fallback_error)}")
-            raise HTTPException(status_code=400, detail=f"Falha no download: {str(fallback_error)}")
+            else:
+                raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
+    except Exception as e:
+        logger.error(f"Erro no download: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(e)}")
 
 # --------------------------------------------------------------
 # DOWNLOAD DE ÁUDIO (apenas yt-dlp, sem fallback por simplicidade)

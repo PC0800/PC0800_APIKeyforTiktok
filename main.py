@@ -55,9 +55,11 @@ from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-    "https://c13558bc.tiktok-downloader-8y2.pages.dev/", # site hospedado no Cloudflare Pages
-    "https://tiktok-downloader-8y2.pages.dev/", # outro dominio do meu site
-      ],
+        "https://tiktok-downloader-8y2.pages.dev",           # sem barra no final
+        "https://*.tiktok-downloader-8y2.pages.dev",         # qualquer subdomínio
+        "https://*.pages.dev",                               # qualquer projeto pages.dev
+        "http://localhost:8000",                             # para testes locais
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

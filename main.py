@@ -4,9 +4,6 @@ import os
 import logging
 import yt_dlp
 import requests
-import asyncio
-import nest_asyncio
-import tempfile
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
 from fastapi.security import APIKeyHeader
@@ -17,19 +14,8 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from fastapi.middleware.cors import CORSMiddleware
 
-# TikTokPy
-from tiktokapipy.async_api import AsyncTikTokAPI
-import aiohttp
-import warnings
-from tiktokapipy import TikTokAPIWarning
-warnings.filterwarnings("ignore", category=TikTokAPIWarning)
-
-# Permite rodar asyncio em ambiente já com loop (útil para alguns servidores)
-nest_asyncio.apply()
-
 # 2. FUNÇÃO AUXILIAR PARA LIMPAR URL DO TIKTOK
 def clean_tiktok_url(url: str) -> str:
-    """Remove parâmetros de rastreamento da URL do TikTok e garante https"""
     if not url:
         return url
     if '?' in url:
@@ -38,53 +24,31 @@ def clean_tiktok_url(url: str) -> str:
         url = 'https://' + url
     return url
 
-# 3. FUNÇÃO PARA EXPANDIR LINKS ENCURTADOS (vt.tiktok.com)
+# 3. FUNÇÃO PARA EXPANDIR LINKS ENCURTADOS
 def expand_tiktok_url(url: str) -> str:
-    """Segue redirecionamentos e retorna a URL final do vídeo"""
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
         response.raise_for_status()
         return response.url
     except Exception as e:
         logger.warning(f"Falha ao expandir URL {url}: {e}")
         return url
 
-# 4. FUNÇÃO DE FALLBACK COM TIKTOKPY
-async def download_with_tiktokpy(url: str, temp_dir: str) -> str:
-    """Baixa o vídeo usando TikTokPy (navegador real). Retorna o caminho do arquivo."""
-    try:
-        async with AsyncTikTokAPI() as api:
-            video = await api.video(url)
-            video_url = video.video_url
-            if not video_url:
-                raise Exception("Nenhuma URL de vídeo encontrada")
-            filename = os.path.join(temp_dir, f"tiktok_video_{video.id}.mp4")
-            async with aiohttp.ClientSession() as session:
-                async with session.get(video_url) as resp:
-                    if resp.status != 200:
-                        raise Exception(f"Erro ao baixar vídeo: status {resp.status}")
-                    with open(filename, "wb") as f:
-                        f.write(await resp.read())
-            return filename
-    except Exception as e:
-        logger.error(f"Erro no TikTokPy: {e}")
-        raise e
-
-# 5. CARREGAR VARIÁVEIS DE AMBIENTE
+# 4. CARREGAR VARIÁVEIS DE AMBIENTE
 load_dotenv()
 
-# 6. CONFIGURAÇÕES INICIAIS
+# 5. CONFIGURAÇÕES INICIAIS
 app = FastAPI(title="API de Download TikTok")
 
-# --- Rate Limiting ---
+# Rate Limiting
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# --- Logging nativo ---
+# Logging
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(
@@ -97,6 +61,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
+# Middleware de log
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
@@ -108,7 +73,7 @@ async def log_requests(request: Request, call_next):
     logger.info(f'Method={request.method} Path={request.url.path} Status={response.status_code} Duration={process_time:.2f}ms IP={client_ip}')
     return response
 
-# --- CORS ---
+# CORS (com * para teste)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -123,14 +88,12 @@ if not API_KEY:
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG_PATH = "ffmpeg"
 
 class DownloadRequest(BaseModel):
     url: str
     video_quality: str = None
     audio_quality: str = None
 
-# 7. FUNÇÃO DE VALIDAÇÃO DA API KEY
 async def validar_api_key(api_key: str = Security(api_key_header)):
     if api_key is None:
         raise HTTPException(
@@ -145,56 +108,67 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
         )
     return api_key
 
-# 8. ENDPOINTS
-
 @app.get("/")
 async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
 
 # --------------------------------------------------------------
-# DOWNLOAD DE VÍDEO (yt-dlp com fallback TikTokPy)
+# DOWNLOAD DE VÍDEO
 # --------------------------------------------------------------
 @app.post("/download/video")
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
     url = clean_tiktok_url(download_req.url)
-    url = expand_tiktok_url(url)  # Expande o link curto
+    url = expand_tiktok_url(url)   # expande link curto
     qualidade = download_req.video_quality
 
-    # Mapeamento de qualidade (apenas 1080p)
     height_map = {"1080p": 1080}
     max_height = height_map.get(qualidade)
 
-    format_spec = f"best[height<={max_height}]" if max_height else "best"
+    if max_height:
+        format_list = [f"best[height<={max_height}]", "best"]
+    else:
+        format_list = ["best"]
 
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
-    ydl_opts = {
-        'format': format_spec,
-        'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
-        'quiet': True,
-        'no_warnings': True,
-        # Opcional: 'impersonate': 'chrome', (se ainda quiser tentar)
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-            if os.path.exists(file_path):
-                return FileResponse(
-                    path=file_path,
-                    filename=os.path.basename(file_path),
-                    media_type="video/mp4"
-                )
-            else:
-                raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
-    except Exception as e:
-        logger.error(f"Erro no download: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(e)}")
+    last_exception = None
+    for format_spec in format_list:
+        ydl_opts = {
+            'format': format_spec,
+            'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'impersonate': 'chrome',   # importante
+            'extractor_args': {
+                'tiktok': {
+                    'app_info': ['7139591046345753862'],
+                }
+            }
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_path = ydl.prepare_filename(info)
+                if os.path.exists(file_path):
+                    return FileResponse(
+                        path=file_path,
+                        filename=os.path.basename(file_path),
+                        media_type="video/mp4"
+                    )
+                else:
+                    raise HTTPException(status_code=404, detail="Arquivo não encontrado")
+        except Exception as e:
+            last_exception = e
+            logger.warning(f"Formato {format_spec} falhou: {str(e)}")
+            continue
+
+    logger.error(f"Todos os formatos falharam: {last_exception}")
+    raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(last_exception)}")
 
 # --------------------------------------------------------------
-# DOWNLOAD DE ÁUDIO (apenas yt-dlp, sem fallback por simplicidade)
+# DOWNLOAD DE ÁUDIO
 # --------------------------------------------------------------
 @app.post("/download/audio")
 @limiter.limit("5/minute")
@@ -243,13 +217,13 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
                     media_type="audio/mpeg"
                 )
             else:
-                raise HTTPException(status_code=404, detail="Arquivo MP3 não encontrado após processamento")
+                raise HTTPException(status_code=404, detail="Arquivo MP3 não encontrado")
     except Exception as e:
         logger.error(f"Erro no download do áudio: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
 
 # --------------------------------------------------------------
-# INFORMAÇÕES DO VÍDEO (apenas yt-dlp)
+# INFORMAÇÕES DO VÍDEO
 # --------------------------------------------------------------
 @app.get("/info")
 @limiter.limit("10/minute")
@@ -282,7 +256,7 @@ async def get_video_info(request: Request, url: str, api_key: str = Depends(vali
         raise HTTPException(status_code=400, detail=f"Erro ao obter informações: {str(e)}")
 
 # --------------------------------------------------------------
-# LIMPEZA DE ARQUIVOS ANTIGOS
+# LIMPEZA
 # --------------------------------------------------------------
 @app.delete("/cleanup")
 @limiter.limit("1/minute")

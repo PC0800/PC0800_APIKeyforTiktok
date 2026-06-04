@@ -39,13 +39,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
-# Middleware para log de requisições
+# Middleware para log de requisições (captura IP real atrás de proxy)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     process_time = (time.time() - start_time) * 1000
-    logger.info(f'Method={request.method} Path={request.url.path} Status={response.status_code} Duration={process_time:.2f}ms IP={request.client.host}')
+    # Tenta obter IP real do cliente (Render usa proxy)
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if not client_ip:
+        client_ip = request.client.host if request.client else "unknown"
+    logger.info(f'Method={request.method} Path={request.url.path} Status={response.status_code} Duration={process_time:.2f}ms IP={client_ip}')
     return response
 
 # --- CORS ---
@@ -92,8 +96,8 @@ async def root():
 
 @app.post("/download/video")
 @limiter.limit("5/minute")
-async def download_video(request: DownloadRequest, req: Request, api_key: str = Depends(validar_api_key)):
-    url = request.url
+async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
+    url = download_req.url
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
@@ -120,8 +124,8 @@ async def download_video(request: DownloadRequest, req: Request, api_key: str = 
 
 @app.post("/download/audio")
 @limiter.limit("5/minute")
-async def download_audio(request: DownloadRequest, req: Request, api_key: str = Depends(validar_api_key)):
-    url = request.url
+async def download_audio(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
+    url = download_req.url
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
@@ -153,7 +157,7 @@ async def download_audio(request: DownloadRequest, req: Request, api_key: str = 
 
 @app.get("/info")
 @limiter.limit("10/minute")
-async def get_video_info(req: Request, url: str, api_key: str = Depends(validar_api_key)):
+async def get_video_info(request: Request, url: str, api_key: str = Depends(validar_api_key)):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -175,7 +179,7 @@ async def get_video_info(req: Request, url: str, api_key: str = Depends(validar_
 
 @app.delete("/cleanup")
 @limiter.limit("1/minute")
-async def cleanup_old_files(req: Request, api_key: str = Depends(validar_api_key), hours: int = 1):
+async def cleanup_old_files(request: Request, api_key: str = Depends(validar_api_key), hours: int = 1):
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     if not os.path.exists(downloads_dir):
         return {"message": "Pasta downloads não existe"}

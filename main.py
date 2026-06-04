@@ -1,6 +1,7 @@
-# 1. IMPORTS (todas as bibliotecas necessárias)
+# 1. IMPORTS
 import time
 import os
+import logging
 import yt_dlp
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
@@ -13,9 +14,6 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-# Logging
-from fastapi_ndjson_logger import RequestResponseLogging
-
 # 2. CARREGAR VARIÁVEIS DE AMBIENTE
 load_dotenv()
 
@@ -27,14 +25,28 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["100/hour"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# --- Configuração do Logging ---
-os.makedirs("logs", exist_ok=True)
-app.add_middleware(
-    RequestResponseLogging,
-    log_dir=os.path.join("logs"),  # Diretório onde os logs serão salvos
-    max_mbytes=10,                 # Tamanho máximo de cada arquivo de log (em MB)
-    backup_count=5                 # Número de arquivos de backup a serem mantidos
+# --- Configuração de logging nativo ---
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(log_dir, "app.log")),
+        logging.StreamHandler()
+    ]
 )
+logger = logging.getLogger("api")
+
+# Middleware para log de requisições
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = (time.time() - start_time) * 1000
+    logger.info(f'Method={request.method} Path={request.url.path} Status={response.status_code} Duration={process_time:.2f}ms IP={request.client.host}')
+    return response
 
 # --- CORS ---
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,8 +91,8 @@ async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
 
 @app.post("/download/video")
-@limiter.limit("3/minute")
-async def download_video(request: DownloadRequest, request_obj: Request, api_key: str = Depends(validar_api_key)):
+@limiter.limit("5/minute")
+async def download_video(request: DownloadRequest, req: Request, api_key: str = Depends(validar_api_key)):
     url = request.url
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
@@ -107,8 +119,8 @@ async def download_video(request: DownloadRequest, request_obj: Request, api_key
         raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(e)}")
 
 @app.post("/download/audio")
-@limiter.limit("3/minute")
-async def download_audio(request: DownloadRequest, request_obj: Request, api_key: str = Depends(validar_api_key)):
+@limiter.limit("5/minute")
+async def download_audio(request: DownloadRequest, req: Request, api_key: str = Depends(validar_api_key)):
     url = request.url
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
@@ -141,7 +153,7 @@ async def download_audio(request: DownloadRequest, request_obj: Request, api_key
 
 @app.get("/info")
 @limiter.limit("10/minute")
-async def get_video_info(request: Request, url: str, api_key: str = Depends(validar_api_key)):
+async def get_video_info(req: Request, url: str, api_key: str = Depends(validar_api_key)):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -163,7 +175,7 @@ async def get_video_info(request: Request, url: str, api_key: str = Depends(vali
 
 @app.delete("/cleanup")
 @limiter.limit("1/minute")
-async def cleanup_old_files(request: Request, api_key: str = Depends(validar_api_key), hours: int = 1):
+async def cleanup_old_files(req: Request, api_key: str = Depends(validar_api_key), hours: int = 1):
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     if not os.path.exists(downloads_dir):
         return {"message": "Pasta downloads não existe"}

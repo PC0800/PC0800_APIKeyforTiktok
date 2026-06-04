@@ -4,4 +4,3 @@ python-dotenv==1.2.2
 yt-dlp==2026.3.17
 static-ffmpeg==2.5.0
 slowapi==0.1.9
-fastapi_ndjson_logger==0.1.0

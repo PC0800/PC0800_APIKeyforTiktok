@@ -56,7 +56,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
     "https://c13558bc.tiktok-downloader-8y2.pages.dev/", # site hospedado no Cloudflare Pages
-    #"https://*.tiktok-downloader-8y2.pages.dev", # subdominio do site do Cloudflare Pages,porém temporariamente deixarei desativado
+    "https://tiktok-downloader-8y2.pages.dev/", # outro dominio do meu site
       ],
     allow_credentials=True,
     allow_methods=["*"],

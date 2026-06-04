@@ -2,6 +2,7 @@
 import time
 import os
 import logging
+import secrets  # <-- ADICIONADO para comparação segura
 import yt_dlp
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
@@ -58,9 +59,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Verificação da chave de API ---
 API_KEY = os.getenv("API_KEY")
 if not API_KEY:
+    logger.error("A variável de ambiente 'API_KEY' não foi configurada!")
     raise ValueError("A variável de ambiente 'API_KEY' não foi configurada!")
+else:
+    # Log apenas o tamanho e os primeiros caracteres para debug (seguro)
+    logger.info(f"API_KEY carregada: {API_KEY[:3]}... (tamanho: {len(API_KEY)})")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,20 +76,34 @@ class DownloadRequest(BaseModel):
     video_quality: str = None
     audio_quality: str = None
 
+# --------------------------------------------------------------
+# VALIDAÇÃO DA API KEY (corrigida com logs e comparação segura)
+# --------------------------------------------------------------
 async def validar_api_key(api_key: str = Security(api_key_header)):
+    logger.info(f"Validando API Key recebida: '{api_key[:5] if api_key else 'None'}...' (tamanho: {len(api_key) if api_key else 0})")
+    
     if api_key is None:
+        logger.warning("Nenhuma chave fornecida")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Chave de API não fornecida. Inclua o cabeçalho 'X-API-Key'.",
             headers={"WWW-Authenticate": "X-API-Key"},
         )
-    if api_key != API_KEY:
+    
+    # Comparação segura contra timing attacks
+    if not secrets.compare_digest(api_key, API_KEY):
+        logger.warning(f"Chave inválida fornecida (início: {api_key[:5]})")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Chave de API inválida. Acesso negado.",
         )
+    
+    logger.info("Chave válida, acesso permitido")
     return api_key
 
+# --------------------------------------------------------------
+# ENDPOINTS
+# --------------------------------------------------------------
 @app.get("/")
 async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}

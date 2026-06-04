@@ -114,3 +114,24 @@ async def download_audio(request: DownloadRequest, api_key: str = Depends(valida
                 raise HTTPException(status_code=404, detail="Arquivo MP3 não encontrado após processamento")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
+# 8. ENDPOINT: Para buscar informações (título e capa)
+@app.get("/info")
+async def get_video_info(url: str, api_key: str = Depends(validar_api_key)):
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            titulo = info.get('title', 'Vídeo TikTok')
+            thumbnail_url = None
+            if info.get('thumbnails'):
+                thumbnail_url = info['thumbnails'][-1]['url']
+            return {
+                "success": True,
+                "title": titulo,
+                "thumbnail": thumbnail_url
+            }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao obter informações: {str(e)}")

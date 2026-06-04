@@ -104,19 +104,20 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
     url = download_req.url
     qualidade = download_req.video_quality
 
-    # Mapeamento para yt-dlp (usando best[height<=...] para manter áudio incluso)
-    if qualidade == "1080p":
-        format_spec = "best[height<=1080]"
-    elif qualidade == "720p":
-        format_spec = "best[height<=720]"
-    elif qualidade == "480p":
-        format_spec = "best[height<=480]"
-    elif qualidade == "2k":
-        format_spec = "best[height<=1440]"
-    elif qualidade == "4k":
-        format_spec = "best[height<=2160]"
+    # Dicionário de mapeamento qualidade -> altura máxima
+    height_map = {
+        "480p": 480,
+        "720p": 720,
+        "1080p": 1080,
+    }
+    max_height = height_map.get(qualidade)
+
+    # Construção do format spec
+    if max_height:
+        # Tenta baixar o melhor stream completo (vídeo+áudio) com altura <= max_height
+        format_spec = f"best[height<={max_height}]"
     else:
-        format_spec = "best"   # melhor qualidade disponível
+        format_spec = "best"   # fallback
 
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
@@ -124,15 +125,13 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
     ydl_opts = {
         'format': format_spec,
         'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
-        'quiet': False,   # temporariamente para ver logs
+        'quiet': True,
         'no_warnings': True,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info)
-            # Log do formato escolhido
-            logger.info(f"Qualidade solicitada: {qualidade}, formato usado: {info.get('format_id', 'desconhecido')}")
             if os.path.exists(file_path):
                 return FileResponse(
                     path=file_path,
@@ -142,6 +141,8 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
             else:
                 raise HTTPException(status_code=404, detail="Arquivo não encontrado após download")
     except Exception as e:
+        # Log do erro detalhado
+        logger.error(f"Erro no download do vídeo: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(e)}")
 
 @app.post("/download/audio")

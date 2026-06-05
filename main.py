@@ -2,8 +2,9 @@
 import time
 import os
 import logging
-import secrets  # <-- ADICIONADO para comparação segura
+import secrets
 import yt_dlp
+import requests                     # Expandir links curtos
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, Security, status, Request
 from fastapi.security import APIKeyHeader
@@ -65,7 +66,6 @@ if not API_KEY:
     logger.error("A variável de ambiente 'API_KEY' não foi configurada!")
     raise ValueError("A variável de ambiente 'API_KEY' não foi configurada!")
 else:
-    # Log apenas o tamanho e os primeiros caracteres para debug (seguro)
     logger.info(f"API_KEY carregada: {API_KEY[:3]}... (tamanho: {len(API_KEY)})")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -76,12 +76,47 @@ class DownloadRequest(BaseModel):
     video_quality: str = None
     audio_quality: str = None
 
+# 🔥 FUNÇÃO PARA EXPANDIR LINKS ENCURTADOS
+def expand_tiktok_url(url: str) -> str:
+    """Segue redirecionamentos e retorna a URL final do vídeo."""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+        response.raise_for_status()
+        expanded = response.url
+        logger.info(f"URL expandida: {expanded}")
+        return expanded
+    except Exception as e:
+        logger.warning(f"Falha ao expandir URL {url}: {e}")
+        return url  # fallback
+
+# 🔥 FUNÇÃO DE LIMPEZA
+def clean_tiktok_url(url: str) -> str:
+    """Remove parâmetros de rastreamento e garante https."""
+    if not url:
+        return url
+    if '?' in url:
+        url = url.split('?')[0]
+    if not url.startswith('http'):
+        url = 'https://' + url
+    return url
+
+# 🔥 FUNÇÃO PARA CONVERTER URL DE FOTO EM URL DE VÍDEO (áudio)
+def fix_photo_url(url: str) -> str:
+    """Se for uma URL de álbum de fotos, substitui '/photo/' por '/video/' para extrair áudio."""
+    if '/photo/' in url:
+        fixed = url.replace('/photo/', '/video/')
+        logger.info(f"URL de foto convertida para vídeo: {fixed}")
+        return fixed
+    return url
+
 # --------------------------------------------------------------
-# VALIDAÇÃO DA API KEY (corrigida com logs e comparação segura)
+# VALIDAÇÃO DA API KEY
 # --------------------------------------------------------------
 async def validar_api_key(api_key: str = Security(api_key_header)):
     logger.info(f"Validando API Key recebida: '{api_key[:5] if api_key else 'None'}...' (tamanho: {len(api_key) if api_key else 0})")
-    
     if api_key is None:
         logger.warning("Nenhuma chave fornecida")
         raise HTTPException(
@@ -89,15 +124,12 @@ async def validar_api_key(api_key: str = Security(api_key_header)):
             detail="Chave de API não fornecida. Inclua o cabeçalho 'X-API-Key'.",
             headers={"WWW-Authenticate": "X-API-Key"},
         )
-    
-    # Comparação segura contra timing attacks
     if not secrets.compare_digest(api_key, API_KEY):
         logger.warning(f"Chave inválida fornecida (início: {api_key[:5]})")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Chave de API inválida. Acesso negado.",
         )
-    
     logger.info("Chave válida, acesso permitido")
     return api_key
 
@@ -109,25 +141,20 @@ async def root():
     return {"mensagem": "Bem-vindo à API de Download do TikTok. Use /docs para a documentação."}
 
 # --------------------------------------------------------------
-# DOWNLOAD DE VÍDEO
+# DOWNLOAD DE VÍDEO (com expansão e correção para posts de foto)
 # --------------------------------------------------------------
 @app.post("/download/video")
 @limiter.limit("5/minute")
 async def download_video(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
-    url = download_req.url.strip()
-    # Remove parâmetros de rastreamento (se houver)
-    if '?' in url:
-        url = url.split('?')[0]
-    if not url.startswith('http'):
-        url = 'https://' + url
+    # LIMPEZA + EXPANSÃO + CORREÇÃO DE FOTO
+    url = clean_tiktok_url(download_req.url.strip())
+    url = expand_tiktok_url(url)
+    url = fix_photo_url(url)   # 🔥 Converte /photo/ em /video/ para extrair áudio
 
     qualidade = download_req.video_quality
     height_map = {"1080p": 1080}
     max_height = height_map.get(qualidade)
-    if max_height:
-        format_spec = f"best[height<={max_height}]"
-    else:
-        format_spec = "best"
+    format_spec = f"best[height<={max_height}]" if max_height else "best"
 
     downloads_dir = os.path.join(BASE_DIR, "downloads")
     os.makedirs(downloads_dir, exist_ok=True)
@@ -155,16 +182,14 @@ async def download_video(request: Request, download_req: DownloadRequest, api_ke
         raise HTTPException(status_code=400, detail=f"Erro ao baixar vídeo: {str(e)}")
 
 # --------------------------------------------------------------
-# DOWNLOAD DE ÁUDIO
+# DOWNLOAD DE ÁUDIO (com expansão e correção para posts de foto)
 # --------------------------------------------------------------
 @app.post("/download/audio")
 @limiter.limit("5/minute")
 async def download_audio(request: Request, download_req: DownloadRequest, api_key: str = Depends(validar_api_key)):
-    url = download_req.url.strip()
-    if '?' in url:
-        url = url.split('?')[0]
-    if not url.startswith('http'):
-        url = 'https://' + url
+    url = clean_tiktok_url(download_req.url.strip())
+    url = expand_tiktok_url(url)
+    url = fix_photo_url(url)   # 🔥 Converte /photo/ em /video/ para extrair áudio
 
     qualidade = download_req.audio_quality
     quality_map = {
@@ -207,15 +232,14 @@ async def download_audio(request: Request, download_req: DownloadRequest, api_ke
         raise HTTPException(status_code=400, detail=f"Erro ao baixar áudio: {str(e)}")
 
 # --------------------------------------------------------------
-# INFORMAÇÕES DO VÍDEO
+# INFORMAÇÕES DO VÍDEO (com expansão e correção para posts de foto)
 # --------------------------------------------------------------
 @app.get("/info")
 @limiter.limit("10/minute")
 async def get_video_info(request: Request, url: str, api_key: str = Depends(validar_api_key)):
-    if '?' in url:
-        url = url.split('?')[0]
-    if not url.startswith('http'):
-        url = 'https://' + url
+    url = clean_tiktok_url(url)
+    url = expand_tiktok_url(url)
+    url = fix_photo_url(url)   # 🔥 Converte /photo/ em /video/ para extrair informações
 
     ydl_opts = {
         'quiet': True,
